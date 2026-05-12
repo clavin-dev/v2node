@@ -3,6 +3,7 @@ package panel
 import (
 	"errors"
 	"fmt"
+	"net/http"
 	"strconv"
 	"time"
 
@@ -28,6 +29,15 @@ type Client struct {
 
 func New(c *conf.NodeConfig) (*Client, error) {
 	client := resty.New()
+	// Custom transport: reuse connections (fast) but discard idle ones
+	// before Cloudflare RSTs them (~60s). This prevents reads on dead
+	// connections that cause "connection reset by peer" and hangs.
+	client.SetTransport(&http.Transport{
+		IdleConnTimeout:       20 * time.Second,  // discard before CF kills at ~60s
+		TLSHandshakeTimeout:   10 * time.Second,  // don't hang on TLS
+		ResponseHeaderTimeout: 15 * time.Second,  // don't hang on slow API
+		MaxIdleConnsPerHost:   2,                  // limit pool size per panel
+	})
 	retryCount := conf.DefaultNodeRetryCount
 	if c.RetryCount != nil {
 		retryCount = *c.RetryCount
