@@ -20,6 +20,11 @@ jobs:
         with:
           go-version: '1.26.1'
 
+      - name: Install UPX
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y upx
+
       - name: Build amd64
         env:
           GOEXPERIMENT: jsonv2
@@ -35,6 +40,13 @@ jobs:
           GOOS: linux
           GOARCH: arm64
         run: go build -ldflags "-s -w" -o v2node-linux-arm64 .
+
+      - name: Compress with UPX
+        run: |
+          upx --best --lzma v2node-linux-amd64
+          # UPX doesn't support cross-arch compression for arm64,
+          # so we only compress amd64 here. arm64 stays as-is but
+          # will be zipped for smaller download.
 
       - name: Package amd64
         run: |
