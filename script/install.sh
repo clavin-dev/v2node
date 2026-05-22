@@ -265,8 +265,20 @@ install_v2node() {
 
     mkdir /usr/local/v2node/ -p
     cd /usr/local/v2node/
-
-    if  [[ -z "$version_param" ]] ; then
+    if [[ "$version_param" == "main" || "$version_param" == "dev" ]]; then
+        echo -e "${green}开始安装 main 分支的最新编译版本...${plain}"
+        if [[ "$arch" == "arm64-v8a" ]]; then
+            url="https://raw.githubusercontent.com/clavin-dev/v2node/main/v2node-linux-arm64"
+        else
+            url="https://raw.githubusercontent.com/clavin-dev/v2node/main/v2node-linux-amd64"
+        fi
+        echo -e "${green}下载地址: ${url}${plain}"
+        curl -L -o /usr/local/v2node/v2node "$url"
+        if [[ $? -ne 0 ]]; then
+            echo -e "${red}从 main 分支下载 v2node 失败，请确保你的服务器能够下载 Github 的文件${plain}"
+            exit 1
+        fi
+    elif  [[ -z "$version_param" ]] ; then
         last_version=$(curl -Ls "https://api.github.com/repos/clavin-dev/m2node/releases/latest" | grep '"tag_name":' | sed -E 's/.*"([^"]+)".*/\1/')
         if [[ ! -n "$last_version" ]]; then
             echo -e "${red}检测 v2node 版本失败，可能是超出 Github API 限制，请稍后再试，或手动指定 v2node 版本安装${plain}"
@@ -281,7 +293,7 @@ install_v2node() {
             exit 1
         fi
     else
-    last_version=$version_param
+        last_version=$version_param
         url="https://github.com/clavin-dev/m2node/releases/download/${last_version}/v2node-linux-amd64"
         echo -e "${green}下载地址: ${url}${plain}"
         curl -L -o /usr/local/v2node/v2node "$url"
