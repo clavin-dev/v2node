@@ -2,9 +2,7 @@ package task
 
 import (
 	"context"
-	"errors"
 	"sync"
-	"sync/atomic"
 	"time"
 
 	log "github.com/sirupsen/logrus"
@@ -14,27 +12,28 @@ type Task struct {
 	Name     string
 	Interval time.Duration
 	Execute  func(context.Context) error
-	Access   sync.RWMutex
-	Running  bool
 	ReloadCh chan struct{}
-	Stop     chan struct{}
 
-	executing atomic.Int32    // guard: 1 = a goroutine is running Execute
-	cancel    context.CancelFunc
+	mu      sync.Mutex
+	running bool
+	stop    chan struct{}
+	cancel  context.CancelFunc
 }
 
 func (t *Task) Start(first bool) error {
-	t.Access.Lock()
-	if t.Running {
-		t.Access.Unlock()
+	t.mu.Lock()
+	if t.running {
+		t.mu.Unlock()
 		return nil
 	}
-	t.Running = true
-	t.Stop = make(chan struct{})
-	t.Access.Unlock()
+	t.running = true
+	t.stop = make(chan struct{})
+	t.mu.Unlock()
+
 	go func() {
 		timer := time.NewTimer(t.Interval)
 		defer timer.Stop()
+
 		if first {
 			t.executeTask()
 		}
@@ -44,7 +43,7 @@ func (t *Task) Start(first bool) error {
 			select {
 			case <-timer.C:
 				// continue
-			case <-t.Stop:
+			case <-t.stop:
 				return
 			}
 
@@ -56,66 +55,32 @@ func (t *Task) Start(first bool) error {
 }
 
 func (t *Task) executeTask() {
-	// Guard: if a leaked goroutine from a previous timeout is still
-	// running Execute, skip this cycle to prevent pile-up.
-	if !t.executing.CompareAndSwap(0, 1) {
-		log.Infof("Task %s previous execution still running, skipping this cycle", t.Name)
-		return
-	}
+	// Create a context that is only cancelled when Close() is called.
+	// No timeout — HTTP-level timeouts (resty 15s + 1 retry) handle
+	// slow connections. This eliminates leaked goroutines entirely.
+	ctx, cancel := context.WithCancel(context.Background())
 
-	// 2*Interval is enough: resty has 15s timeout + 1 retry = 30s per HTTP call.
-	// Cap at 2 minutes so stuck connections are killed quickly.
-	timeout := min(2*t.Interval, 2*time.Minute)
-	ctx, cancel := context.WithTimeout(context.Background(), timeout)
-
-	// Store cancel so Close() can abort a stuck task
-	t.Access.Lock()
+	t.mu.Lock()
 	t.cancel = cancel
-	t.Access.Unlock()
+	t.mu.Unlock()
 
-	done := make(chan error, 1)
-	go func() {
-		done <- t.Execute(ctx)
-	}()
+	err := t.Execute(ctx)
+	cancel()
 
-	select {
-	case err := <-done:
-		// Goroutine completed within timeout — release guard
-		cancel()
-		t.executing.Store(0)
-		if err != nil {
-			if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
-				log.Warnf("Task %s context cancelled, will retry next cycle", t.Name)
-				return
-			}
-			log.Errorf("Task %s execution error: %v", t.Name, err)
-		}
-
-	case <-ctx.Done():
-		// Timeout: cancel the context so the goroutine's HTTP calls abort.
-		// Immediately reset the guard so the next cycle can spawn a fresh
-		// execution. The old goroutine may leak if it ignores context
-		// cancellation (e.g. stuck TLS handshake), but it holds minimal
-		// memory and will eventually be collected when the process exits.
-		cancel()
-		t.executing.Store(0)
-		log.Warnf("Task %s execution timed out, will retry next cycle", t.Name)
+	if err != nil {
+		log.Warnf("Task %s execution error: %v", t.Name, err)
 	}
 }
 
-func (t *Task) safeStop() {
-	t.Access.Lock()
-	if t.Running {
-		t.Running = false
-		close(t.Stop)
+func (t *Task) Close() {
+	t.mu.Lock()
+	if t.running {
+		t.running = false
+		close(t.stop)
 		if t.cancel != nil {
 			t.cancel()
 		}
 	}
-	t.Access.Unlock()
-}
-
-func (t *Task) Close() {
-	t.safeStop()
+	t.mu.Unlock()
 	log.Warningf("Task %s stopped", t.Name)
 }
