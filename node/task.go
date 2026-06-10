@@ -14,14 +14,14 @@ import (
 func (c *Controller) startTasks(node *panel.NodeInfo) {
 	// fetch node info task
 	c.nodeInfoMonitorPeriodic = &task.Task{
-		Name:     "nodeInfoMonitor",
+		Name:     "nodeInfoMonitor[" + c.tag + "]",
 		Interval: node.PullInterval,
 		Execute:  c.nodeInfoMonitor,
 		ReloadCh: c.server.ReloadCh,
 	}
 	// fetch user list task
 	c.userReportPeriodic = &task.Task{
-		Name:     "reportUserTrafficTask",
+		Name:     "reportUserTrafficTask[" + c.tag + "]",
 		Interval: node.PushInterval,
 		Execute:  c.reportUserTrafficTask,
 		ReloadCh: c.server.ReloadCh,
@@ -137,6 +137,12 @@ func (c *Controller) nodeInfoMonitor(ctx context.Context) (err error) {
 		log.WithField("tag", c.tag).Debug("User list no change")
 		return nil
 	}
+	// FIX: if context is already cancelled, we are a leaked goroutine
+	// from a timed-out cycle. Abort to avoid overwriting newer state.
+	if ctx.Err() != nil {
+		log.WithField("tag", c.tag).Warn("Leaked goroutine detected after GetUserList, aborting commit")
+		return nil
+	}
 	deleted, added, modified := compareUserList(c.userList, newU)
 	if len(deleted) > 0 {
 		// have deleted users
@@ -168,8 +174,13 @@ func (c *Controller) nodeInfoMonitor(ctx context.Context) (err error) {
 		// update Limiter
 		c.limiter.UpdateUser(c.tag, added, deleted, modified)
 	}
-	// FIX: commit ETag only AFTER userList is updated, guaranteeing
-	// they are always in sync. This is the only change vs upstream.
+	// FIX: final guard — if context was cancelled during user operations,
+	// do NOT commit. This prevents leaked goroutines from overwriting
+	// newer ETag/userList with stale data.
+	if ctx.Err() != nil {
+		log.WithField("tag", c.tag).Warn("Leaked goroutine detected before commit, discarding stale state")
+		return nil
+	}
 	c.userList = newU
 	c.apiClient.CommitUserEtag(newEtag)
 	log.WithField("tag", c.tag).Infof("%d user deleted, %d user added, %d user modified", len(deleted), len(added), len(modified))
