@@ -23,10 +23,9 @@ func (c *Controller) startTasks(node *panel.NodeInfo) {
 		Execute:  c.reportUserTrafficTask,
 	}
 	log.WithField("tag", c.tag).Info("Start monitor node status")
-	// delay to start nodeInfoMonitor
-	_ = c.nodeInfoMonitorPeriodic.Start(false)
+	_ = c.nodeInfoMonitorPeriodic.Start(true)
 	log.WithField("tag", c.tag).Info("Start report node status")
-	_ = c.userReportPeriodic.Start(false)
+	_ = c.userReportPeriodic.Start(true)
 	if node.Security == panel.Tls {
 		switch c.info.Common.CertInfo.CertMode {
 		case "none", "", "file", "self":
