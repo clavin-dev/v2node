@@ -1,6 +1,7 @@
 package panel
 
 import (
+	"crypto/tls"
 	"errors"
 	"fmt"
 	"net/http"
@@ -33,13 +34,15 @@ func New(c *conf.NodeConfig) (*Client, error) {
 	// before Cloudflare RSTs them (~60s). This prevents reads on dead
 	// connections that cause "connection reset by peer" and hangs.
 	client.SetTransport(&http.Transport{
-		// CRITICAL: Disable HTTP/2. Go's HTTP/2 connection multiplexing causes
-		// "http2: timeout awaiting response headers" after long uptime because
-		// a single dead HTTP/2 connection silently blocks ALL requests to the
-		// same host. HTTP/1.1 with connection pooling is more resilient: each
-		// request gets its own TCP connection, so one dead connection doesn't
-		// block others.
-		ForceAttemptHTTP2:     false,
+		// CRITICAL: Fully disable HTTP/2. ForceAttemptHTTP2=false alone is NOT
+		// enough — Go's TLS ALPN can still negotiate h2 silently. Setting
+		// TLSNextProto to an empty non-nil map is the Go-official way to
+		// prevent HTTP/2 entirely. Without this, long-lived HTTP/2 connections
+		// rot silently, blocking ALL requests on the same multiplexed conn and
+		// causing goroutine leaks that lead to OOM kills after hours of uptime.
+		ForceAttemptHTTP2: false,
+		TLSNextProto:      make(map[string]func(authority string, c *tls.Conn) http.RoundTripper),
+
 		IdleConnTimeout:       20 * time.Second, // discard before CF kills at ~60s
 		TLSHandshakeTimeout:   10 * time.Second, // don't hang on TLS
 		ResponseHeaderTimeout: 15 * time.Second, // don't hang on slow API
