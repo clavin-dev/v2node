@@ -14,12 +14,11 @@ type Task struct {
 	Access   sync.RWMutex
 	Running  bool
 	Stop     chan struct{}
+	Done     chan struct{} // closed when goroutine actually exits
 }
 
-// Start launches the periodic task. Like XrayR: simple ticker loop,
-// no goroutine wrapping, no context timeout. Each API call uses its
-// own resty timeout — if one call is slow, it blocks only itself,
-// never leaks goroutines, never corrupts state.
+// Start launches the periodic task. Simple ticker loop — each API call
+// uses its own resty timeout, never leaks goroutines, never corrupts state.
 func (t *Task) Start(first bool) error {
 	t.Access.Lock()
 	if t.Running {
@@ -28,8 +27,10 @@ func (t *Task) Start(first bool) error {
 	}
 	t.Running = true
 	t.Stop = make(chan struct{})
+	t.Done = make(chan struct{})
 	t.Access.Unlock()
 	go func() {
+		defer close(t.Done) // signal that goroutine has exited
 		timer := time.NewTimer(t.Interval)
 		defer timer.Stop()
 		if first {
@@ -66,7 +67,18 @@ func (t *Task) safeStop() {
 	t.Access.Unlock()
 }
 
+// Close signals the task to stop and WAITS for the goroutine to fully
+// exit (up to 30s). This prevents race conditions during reload where
+// the old goroutine accesses a nil dispatcher after V2Core.Close().
 func (t *Task) Close() {
 	t.safeStop()
+	if t.Done != nil {
+		select {
+		case <-t.Done:
+			// goroutine exited cleanly
+		case <-time.After(30 * time.Second):
+			log.Warnf("Task %s did not stop within 30s, proceeding", t.Name)
+		}
+	}
 	log.Warningf("Task %s stopped", t.Name)
 }

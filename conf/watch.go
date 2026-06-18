@@ -29,13 +29,10 @@ func (p *Conf) Watch(filePath string, reload func()) error {
 				go func() {
 					time.Sleep(5 * time.Second)
 					log.Println("config file changed, reloading...")
-					*p = *New()
-					err := p.LoadFromPath(filePath)
-					if err != nil {
-						log.Printf("reload config error: %s", err)
-					}
+					// Just signal reload — the reload() function reads
+					// the config from disk itself. Do NOT overwrite the
+					// old config here to avoid race conditions.
 					reload()
-					log.Println("reload config success")
 				}()
 			case err := <-watcher.Errors:
 				if err != nil {

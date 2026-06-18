@@ -19,9 +19,7 @@ func (c *Controller) reportUserTrafficTask() (err error) {
 			log.WithFields(log.Fields{
 				"tag": c.tag,
 				"err": err,
-			}).Info("Report user traffic failed, adding traffic back to counters")
-			// Add unreported traffic back so it's not lost
-			c.server.AddBackTraffic(c.tag, userTraffic)
+			}).Warn("Report user traffic failed")
 		} else {
 			log.WithField("tag", c.tag).Infof("Report %d users traffic", len(userTraffic))
 		}

@@ -1,6 +1,7 @@
 package node
 
 import (
+	"reflect"
 	"time"
 
 	log "github.com/sirupsen/logrus"
@@ -42,79 +43,74 @@ func (c *Controller) startTasks(node *panel.NodeInfo) {
 	}
 }
 
-// nodeInfoMonitor is a simple, synchronous function — no context, no
-// goroutine wrapping, no timeout cancellation. Each API call has its
-// own resty timeout. If one call fails, we log and move on.
-// This eliminates leaked goroutines and state desync entirely.
+// nodeInfoMonitor follows XrayR's pattern exactly:
+// 1. Fetch node info (304 = not modified)
+// 2. If modified, compare parsed struct with reflect.DeepEqual
+// 3. Only do DelNode+AddNode if struct actually changed
 func (c *Controller) nodeInfoMonitor() (err error) {
-	// get node info
+	// Fetch node info
+	var nodeInfoChanged = true
 	newN, err := c.apiClient.GetNodeInfo()
 	if err != nil {
-		log.WithFields(log.Fields{
-			"tag": c.tag,
-			"err": err,
-		}).Error("Get node info failed")
-		return nil
-	}
-	if newN != nil {
-		log.WithFields(log.Fields{
-			"tag": c.tag,
-		}).Info("Node info changed, updating in-place")
-		// In-place update: only this node's inbound is replaced.
-		// All other nodes and their connections remain untouched.
-		if err = c.server.DelNode(c.tag); err != nil {
+		if err.Error() == panel.NodeNotModified {
+			nodeInfoChanged = false
+			newN = c.info
+		} else {
 			log.WithFields(log.Fields{
 				"tag": c.tag,
 				"err": err,
-			}).Error("Failed to remove old inbound")
+			}).Error("Get node info failed")
 			return nil
 		}
+	}
 
-		// Xray listener shutdown is asynchronous; wait for port to be released
-		time.Sleep(time.Second)
-
-		var addErr error
-		for i := 0; i < 5; i++ {
-			addErr = c.server.AddNode(c.tag, newN)
-			if addErr == nil {
-				break
-			}
-			log.WithFields(log.Fields{"tag": c.tag, "err": addErr}).Warn("Retrying AddNode due to port conflict")
-			time.Sleep(time.Second * 2)
-		}
-
-		if addErr != nil {
-			log.WithFields(log.Fields{
-				"tag": c.tag,
-				"err": addErr,
-			}).Error("Failed to add new inbound after retries")
-			// We skip setting c.info so next time the node restarts it might pick up changes,
-			// though ETag cache will block it unless panel config actually changes again.
-			return nil
-		}
-		// Re-add all current users to the new inbound
-		if len(c.userList) > 0 {
-			_, err = c.server.AddUsers(&vCore.AddUsersParams{
-				Tag:      c.tag,
-				NodeInfo: newN,
-				Users:    c.userList,
-			})
-			if err != nil {
+	// If node info changed, check if it REALLY changed via DeepEqual
+	if nodeInfoChanged {
+		if !reflect.DeepEqual(c.info, newN) {
+			log.WithField("tag", c.tag).Info("Node info changed, updating in-place")
+			// Remove old inbound
+			if err = c.server.DelNode(c.tag); err != nil {
 				log.WithFields(log.Fields{
 					"tag": c.tag,
 					"err": err,
-				}).Error("Failed to re-add users after inbound update")
+				}).Error("Failed to remove old inbound")
 				return nil
 			}
+			// Update node info before AddNode (same as XrayR)
+			c.info = newN
+			// Wait for port to be released
+			time.Sleep(time.Second)
+			// Add new inbound
+			if err = c.server.AddNode(c.tag, newN); err != nil {
+				log.WithFields(log.Fields{
+					"tag": c.tag,
+					"err": err,
+				}).Error("Failed to add new inbound")
+				return nil
+			}
+			// Re-add all current users to the new inbound
+			if len(c.userList) > 0 {
+				_, err = c.server.AddUsers(&vCore.AddUsersParams{
+					Tag:      c.tag,
+					NodeInfo: newN,
+					Users:    c.userList,
+				})
+				if err != nil {
+					log.WithFields(log.Fields{
+						"tag": c.tag,
+						"err": err,
+					}).Error("Failed to re-add users after inbound update")
+					return nil
+				}
+			}
+			log.WithField("tag", c.tag).Info("Node inbound updated")
+		} else {
+			nodeInfoChanged = false
 		}
-		c.info = newN
-		log.WithField("tag", c.tag).Info("Node inbound updated without restart")
-	} else {
-		log.WithField("tag", c.tag).Debug("Node info no change")
 	}
 
-	// get user info — ETag is NOT committed here; we hold newEtag
-	// and only commit it after c.userList is successfully updated.
+	// Update users
+	var usersChanged = true
 	newU, newEtag, err := c.apiClient.GetUserList()
 	if err != nil {
 		log.WithFields(log.Fields{
@@ -122,6 +118,10 @@ func (c *Controller) nodeInfoMonitor() (err error) {
 			"err": err,
 		}).Error("Get user list failed")
 		return nil
+	}
+	if len(newU) == 0 {
+		usersChanged = false
+		newU = c.userList
 	}
 
 	// get user alive — if it fails, we still proceed with user sync.
@@ -131,53 +131,50 @@ func (c *Controller) nodeInfoMonitor() (err error) {
 			"tag": c.tag,
 			"err": err,
 		}).Warn("Get alive list failed, proceeding with user sync")
-		// Don't return — continue with user sync
 	}
 
 	// update alive list
 	if newA != nil {
 		c.limiter.UpdateAliveList(newA)
 	}
-	// node no changed, check users
-	if len(newU) == 0 {
-		log.WithField("tag", c.tag).Debug("User list no change")
-		return nil
-	}
-	deleted, added, modified := compareUserList(c.userList, newU)
-	if len(deleted) > 0 {
-		// have deleted users
-		err = c.server.DelUsers(deleted, c.tag, c.info)
-		if err != nil {
-			log.WithFields(log.Fields{
-				"tag": c.tag,
-				"err": err,
-			}).Error("Delete users failed")
-			return nil
+
+	if nodeInfoChanged {
+		// Node changed — users were already re-added above, just sync userList
+		c.userList = newU
+		c.apiClient.CommitUserEtag(newEtag)
+	} else if usersChanged {
+		deleted, added, modified := compareUserList(c.userList, newU)
+		if len(deleted) > 0 {
+			err = c.server.DelUsers(deleted, c.tag, c.info)
+			if err != nil {
+				log.WithFields(log.Fields{
+					"tag": c.tag,
+					"err": err,
+				}).Error("Delete users failed")
+				return nil
+			}
 		}
-	}
-	if len(added) > 0 {
-		// have added users
-		_, err = c.server.AddUsers(&vCore.AddUsersParams{
-			Tag:      c.tag,
-			NodeInfo: c.info,
-			Users:    added,
-		})
-		if err != nil {
-			log.WithFields(log.Fields{
-				"tag": c.tag,
-				"err": err,
-			}).Error("Add users failed")
-			return nil
+		if len(added) > 0 {
+			_, err = c.server.AddUsers(&vCore.AddUsersParams{
+				Tag:      c.tag,
+				NodeInfo: c.info,
+				Users:    added,
+			})
+			if err != nil {
+				log.WithFields(log.Fields{
+					"tag": c.tag,
+					"err": err,
+				}).Error("Add users failed")
+				return nil
+			}
 		}
+		if len(added) > 0 || len(deleted) > 0 || len(modified) > 0 {
+			c.limiter.UpdateUser(c.tag, added, deleted, modified)
+		}
+		c.userList = newU
+		c.apiClient.CommitUserEtag(newEtag)
+		log.WithField("tag", c.tag).Infof("%d user deleted, %d user added, %d user modified", len(deleted), len(added), len(modified))
 	}
-	if len(added) > 0 || len(deleted) > 0 || len(modified) > 0 {
-		// update Limiter
-		c.limiter.UpdateUser(c.tag, added, deleted, modified)
-	}
-	// Always commit — we are the only goroutine modifying this state,
-	// no leaks, no races, no desync possible.
-	c.userList = newU
-	c.apiClient.CommitUserEtag(newEtag)
-	log.WithField("tag", c.tag).Infof("%d user deleted, %d user added, %d user modified", len(deleted), len(added), len(modified))
+
 	return nil
 }

@@ -98,7 +98,7 @@ func serverHandle(_ *cobra.Command, _ []string) {
 	}
 	defer v2core.Close()
 	//node
-	err = nodes.Start(c.NodeConfigs, v2core)
+	err = nodes.Start(v2core)
 	if err != nil {
 		log.WithField("err", err).Error("Run nodes failed")
 		return
@@ -131,33 +131,50 @@ func serverHandle(_ *cobra.Command, _ []string) {
 		case <-reloadCh:
 			log.Info("收到重启信号，正在重新加载配置...")
 			if err := reload(config, &nodes, &v2core); err != nil {
-				log.WithField("err", err).Panic("重启失败")
+				log.WithField("err", err).Error("重启失败，保持当前状态运行")
+			} else {
+				log.Info("重启成功")
 			}
-			log.Info("重启成功")
 		}
 	}
 }
 
 func reload(config string, nodes **node.Node, v2core **core.V2Core) error {
-	// Preserve old reload channel so new core continues to receive signals
+	// ────────────────────────────────────────────────────────
+	// Phase 1: VALIDATE — read new config and fetch all panel
+	// data BEFORE touching the running system. If anything
+	// fails here, we abort and keep the old nodes running.
+	// ────────────────────────────────────────────────────────
+	newConf := conf.New()
+	if err := newConf.LoadFromPath(config); err != nil {
+		return fmt.Errorf("load config: %w", err)
+	}
+
+	newNodes, err := node.New(newConf.NodeConfigs)
+	if err != nil {
+		return fmt.Errorf("fetch node info: %w (old nodes still running)", err)
+	}
+
+	// ────────────────────────────────────────────────────────
+	// Phase 2: TEARDOWN — new config is valid, now tear down
+	// the old system. From this point on we MUST succeed or
+	// the process is in an inconsistent state.
+	// ────────────────────────────────────────────────────────
 	var oldReloadCh chan struct{}
 	if *v2core != nil {
 		oldReloadCh = (*v2core).ReloadCh
 	}
 
 	if err := (*nodes).Close(); err != nil {
-		return err
+		log.WithField("err", err).Error("Close old nodes failed during reload")
 	}
-
 	if err := (*v2core).Close(); err != nil {
-		return err
+		log.WithField("err", err).Error("Close old core failed during reload")
 	}
 
-	newConf := conf.New()
-	if err := newConf.LoadFromPath(config); err != nil {
-		return err
-	}
-
+	// ────────────────────────────────────────────────────────
+	// Phase 3: REBUILD — start the new system.
+	// ────────────────────────────────────────────────────────
 	switch newConf.LogConfig.Level {
 	case "debug":
 		log.SetLevel(log.DebugLevel)
@@ -181,20 +198,14 @@ func reload(config string, nodes **node.Node, v2core **core.V2Core) error {
 		}
 	}
 
-	newNodes, err := node.New(newConf.NodeConfigs)
-	if err != nil {
-		return err
-	}
-
 	newCore := core.New(newConf)
-	// Reattach reload channel
 	newCore.ReloadCh = oldReloadCh
 	if err := newCore.Start(newNodes.NodeInfos); err != nil {
-		return err
+		return fmt.Errorf("start new core: %w", err)
 	}
 
-	if err := newNodes.Start(newConf.NodeConfigs, newCore); err != nil {
-		return err
+	if err := newNodes.Start(newCore); err != nil {
+		return fmt.Errorf("start new nodes: %w", err)
 	}
 
 	*nodes = newNodes

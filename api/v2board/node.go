@@ -1,8 +1,7 @@
 package panel
 
 import (
-	"crypto/sha256"
-	"encoding/hex"
+	"errors"
 	"fmt"
 	"path/filepath"
 	"reflect"
@@ -12,6 +11,8 @@ import (
 
 	"encoding/json"
 )
+
+const NodeNotModified = "NodeNotModified"
 
 // Security type
 const (
@@ -125,6 +126,9 @@ type EncSettings struct {
 	PrivateKey    string `json:"private_key"`
 }
 
+// GetNodeInfo fetches node config from the panel.
+// Returns (nil, error{NodeNotModified}) on 304.
+// Returns (nodeInfo, nil) on 200 with valid data.
 func (c *Client) GetNodeInfo() (node *NodeInfo, err error) {
 	const path = "/api/v2/server/config"
 	r, err := c.client.
@@ -139,16 +143,14 @@ func (c *Client) GetNodeInfo() (node *NodeInfo, err error) {
 		return nil, fmt.Errorf("received nil response")
 	}
 
+	// ETag: 304 means not modified
 	if r.StatusCode() == 304 {
-		return nil, nil
+		return nil, errors.New(NodeNotModified)
 	}
-	hash := sha256.Sum256(r.Body())
-	newBodyHash := hex.EncodeToString(hash[:])
-	if c.responseBodyHash == newBodyHash {
-		return nil, nil
+	// Update ETag immediately (same as XrayR)
+	if r.Header().Get("ETag") != "" && r.Header().Get("ETag") != c.nodeEtag {
+		c.nodeEtag = r.Header().Get("ETag")
 	}
-	c.responseBodyHash = newBodyHash
-	c.nodeEtag = r.Header().Get("ETag")
 
 	if r != nil {
 		defer func() {
