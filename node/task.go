@@ -1,6 +1,8 @@
 package node
 
 import (
+	"fmt"
+	"net"
 	"reflect"
 	"time"
 
@@ -76,16 +78,15 @@ func (c *Controller) nodeInfoMonitor() (err error) {
 				}).Error("Failed to remove old inbound")
 				return nil
 			}
-			// Update node info before AddNode (same as XrayR)
-			c.info = newN
 			// Wait for port to be released
 			time.Sleep(time.Second)
-			// Add new inbound
+			// Add new inbound (do NOT update c.info yet)
 			if err = c.server.AddNode(c.tag, newN); err != nil {
 				log.WithFields(log.Fields{
 					"tag": c.tag,
 					"err": err,
-				}).Error("Failed to add new inbound")
+				}).Error("Failed to add new inbound, will retry next cycle")
+				// c.info stays old → next DeepEqual detects diff → auto retry
 				return nil
 			}
 			// Re-add all current users to the new inbound
@@ -103,6 +104,8 @@ func (c *Controller) nodeInfoMonitor() (err error) {
 					return nil
 				}
 			}
+			// Only update c.info AFTER everything succeeds
+			c.info = newN
 			log.WithField("tag", c.tag).Info("Node inbound updated")
 		} else {
 			nodeInfoChanged = false
@@ -175,6 +178,42 @@ func (c *Controller) nodeInfoMonitor() (err error) {
 		c.userList = newU
 		c.apiClient.CommitUserEtag(newEtag)
 		log.WithField("tag", c.tag).Infof("%d user deleted, %d user added, %d user modified", len(deleted), len(added), len(modified))
+	}
+
+	// Port health check: verify our listening port is still alive.
+	// If the port dropped (OS reclaim, xray-core crash, etc.), rebuild it.
+	if c.info != nil && c.info.Common != nil && c.info.Common.ServerPort > 0 {
+		addr := fmt.Sprintf("127.0.0.1:%d", c.info.Common.ServerPort)
+		conn, dialErr := net.DialTimeout("tcp", addr, 2*time.Second)
+		if dialErr != nil {
+			log.WithFields(log.Fields{
+				"tag":  c.tag,
+				"port": c.info.Common.ServerPort,
+			}).Warn("Port health check failed, rebuilding inbound")
+			_ = c.server.DelNode(c.tag)
+			time.Sleep(time.Second)
+			if rebuildErr := c.server.AddNode(c.tag, c.info); rebuildErr != nil {
+				log.WithFields(log.Fields{
+					"tag": c.tag,
+					"err": rebuildErr,
+				}).Error("Port rebuild failed, will retry next cycle")
+			} else {
+				// Re-add users after rebuild
+				if len(c.userList) > 0 {
+					_, _ = c.server.AddUsers(&vCore.AddUsersParams{
+						Tag:      c.tag,
+						NodeInfo: c.info,
+						Users:    c.userList,
+					})
+				}
+				log.WithFields(log.Fields{
+					"tag":  c.tag,
+					"port": c.info.Common.ServerPort,
+				}).Info("Port rebuilt successfully")
+			}
+		} else {
+			conn.Close()
+		}
 	}
 
 	return nil
