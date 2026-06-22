@@ -1,7 +1,6 @@
 package node
 
 import (
-	"errors"
 	"fmt"
 
 	log "github.com/sirupsen/logrus"
@@ -44,21 +43,23 @@ func (c *Controller) Start(x *core.V2Core) error {
 	// First fetch Node Info
 	node := c.info
 	if node == nil {
-	c.info, err = c.apiClient.GetNodeInfo()
+		var initEtag string
+		c.info, initEtag, err = c.apiClient.GetNodeInfo()
 		if err != nil {
 			return fmt.Errorf("get node info error: %s", err)
 		}
+		c.apiClient.CommitNodeEtag(initEtag)
 		node = c.info
 	}
 	// Update user
-	var initEtag string
-	c.userList, initEtag, err = c.apiClient.GetUserList()
+	var initUserEtag string
+	c.userList, initUserEtag, err = c.apiClient.GetUserList()
 	if err != nil {
 		return fmt.Errorf("get user list error: %s", err)
 	}
-	c.apiClient.CommitUserEtag(initEtag)
+	c.apiClient.CommitUserEtag(initUserEtag)
 	if len(c.userList) == 0 {
-		return errors.New("add users error: not have any user")
+		log.WithField("tag", node.Tag).Warn("No users found, node will start and wait for users")
 	}
 	c.aliveMap, err = c.apiClient.GetUserAlive()
 	if err != nil {
@@ -81,15 +82,17 @@ func (c *Controller) Start(x *core.V2Core) error {
 	if err != nil {
 		return fmt.Errorf("add new node error: %s", err)
 	}
-	added, err := c.server.AddUsers(&core.AddUsersParams{
-		Tag:      c.tag,
-		Users:    c.userList,
-		NodeInfo: node,
-	})
-	if err != nil {
-		return fmt.Errorf("add users error: %s", err)
+	if len(c.userList) > 0 {
+		added, err := c.server.AddUsers(&core.AddUsersParams{
+			Tag:      c.tag,
+			Users:    c.userList,
+			NodeInfo: node,
+		})
+		if err != nil {
+			return fmt.Errorf("add users error: %s", err)
+		}
+		log.WithField("tag", c.tag).Infof("Added %d new users", added)
 	}
-	log.WithField("tag", c.tag).Infof("Added %d new users", added)
 	c.info = node
 	c.startTasks(node)
 	return nil

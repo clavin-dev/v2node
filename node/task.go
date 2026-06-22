@@ -3,7 +3,6 @@ package node
 import (
 	"fmt"
 	"net"
-	"reflect"
 	"time"
 
 	log "github.com/sirupsen/logrus"
@@ -45,14 +44,51 @@ func (c *Controller) startTasks(node *panel.NodeInfo) {
 	}
 }
 
-// nodeInfoMonitor follows XrayR's pattern exactly:
+// nodeNeedsRebuild checks only the fields that actually require a port
+// rebuild (DelNode + AddNode). Ignores json.RawMessage byte differences
+// and BaseConfig interval changes that don't affect the inbound listener.
+func nodeNeedsRebuild(old, new *panel.NodeInfo) bool {
+	if old == nil || new == nil || old.Common == nil || new.Common == nil {
+		return true
+	}
+	o := old.Common
+	n := new.Common
+	// Core listener fields
+	if o.ServerPort != n.ServerPort ||
+		o.Protocol != n.Protocol ||
+		o.ListenIP != n.ListenIP ||
+		o.Network != n.Network ||
+		o.Tls != n.Tls ||
+		o.Flow != n.Flow ||
+		o.Cipher != n.Cipher ||
+		o.ServerKey != n.ServerKey ||
+		o.ServerName != n.ServerName ||
+		o.CongestionControl != n.CongestionControl ||
+		o.Encryption != n.Encryption {
+		return true
+	}
+	// TLS settings
+	if o.TlsSettings.ServerName != n.TlsSettings.ServerName ||
+		o.TlsSettings.PrivateKey != n.TlsSettings.PrivateKey ||
+		o.TlsSettings.Dest != n.TlsSettings.Dest ||
+		o.TlsSettings.CertMode != n.TlsSettings.CertMode {
+		return true
+	}
+	// Security type change
+	if old.Security != new.Security {
+		return true
+	}
+	return false
+}
+
+// nodeInfoMonitor:
 // 1. Fetch node info (304 = not modified)
-// 2. If modified, compare parsed struct with reflect.DeepEqual
-// 3. Only do DelNode+AddNode if struct actually changed
+// 2. If modified, compare critical fields only (not raw JSON bytes)
+// 3. Only do DelNode+AddNode if listener config actually changed
 func (c *Controller) nodeInfoMonitor() (err error) {
 	// Fetch node info
 	var nodeInfoChanged = true
-	newN, err := c.apiClient.GetNodeInfo()
+	newN, newNodeEtag, err := c.apiClient.GetNodeInfo()
 	if err != nil {
 		if err.Error() == panel.NodeNotModified {
 			nodeInfoChanged = false
@@ -66,10 +102,10 @@ func (c *Controller) nodeInfoMonitor() (err error) {
 		}
 	}
 
-	// If node info changed, check if it REALLY changed via DeepEqual
+	// If node info changed, check if it REALLY needs a port rebuild
 	if nodeInfoChanged {
-		if !reflect.DeepEqual(c.info, newN) {
-			log.WithField("tag", c.tag).Info("Node info changed, updating in-place")
+		if nodeNeedsRebuild(c.info, newN) {
+			log.WithField("tag", c.tag).Info("Node config changed, rebuilding inbound")
 			// Remove old inbound
 			if err = c.server.DelNode(c.tag); err != nil {
 				log.WithFields(log.Fields{
@@ -86,7 +122,7 @@ func (c *Controller) nodeInfoMonitor() (err error) {
 					"tag": c.tag,
 					"err": err,
 				}).Error("Failed to add new inbound, will retry next cycle")
-				// c.info stays old → next DeepEqual detects diff → auto retry
+				// c.info stays old → next cycle retries automatically
 				return nil
 			}
 			// Re-add all current users to the new inbound
@@ -104,10 +140,14 @@ func (c *Controller) nodeInfoMonitor() (err error) {
 					return nil
 				}
 			}
-			// Only update c.info AFTER everything succeeds
+			// Only update c.info and commit ETag AFTER everything succeeds
 			c.info = newN
+			c.apiClient.CommitNodeEtag(newNodeEtag)
 			log.WithField("tag", c.tag).Info("Node inbound updated")
 		} else {
+			// Config fetched but no rebuild needed — just commit ETag
+			c.info = newN
+			c.apiClient.CommitNodeEtag(newNodeEtag)
 			nodeInfoChanged = false
 		}
 	}
@@ -181,38 +221,43 @@ func (c *Controller) nodeInfoMonitor() (err error) {
 	}
 
 	// Port health check: verify our listening port is still alive.
-	// If the port dropped (OS reclaim, xray-core crash, etc.), rebuild it.
+	// Only for TCP-based protocols (skip hysteria2/tuic which use UDP).
 	if c.info != nil && c.info.Common != nil && c.info.Common.ServerPort > 0 {
-		addr := fmt.Sprintf("127.0.0.1:%d", c.info.Common.ServerPort)
-		conn, dialErr := net.DialTimeout("tcp", addr, 2*time.Second)
-		if dialErr != nil {
-			log.WithFields(log.Fields{
-				"tag":  c.tag,
-				"port": c.info.Common.ServerPort,
-			}).Warn("Port health check failed, rebuilding inbound")
-			_ = c.server.DelNode(c.tag)
-			time.Sleep(time.Second)
-			if rebuildErr := c.server.AddNode(c.tag, c.info); rebuildErr != nil {
-				log.WithFields(log.Fields{
-					"tag": c.tag,
-					"err": rebuildErr,
-				}).Error("Port rebuild failed, will retry next cycle")
-			} else {
-				// Re-add users after rebuild
-				if len(c.userList) > 0 {
-					_, _ = c.server.AddUsers(&vCore.AddUsersParams{
-						Tag:      c.tag,
-						NodeInfo: c.info,
-						Users:    c.userList,
-					})
-				}
+		switch c.info.Type {
+		case "hysteria2", "tuic":
+			// UDP protocols — cannot TCP-dial, skip health check
+		default:
+			addr := fmt.Sprintf("127.0.0.1:%d", c.info.Common.ServerPort)
+			conn, dialErr := net.DialTimeout("tcp", addr, 2*time.Second)
+			if dialErr != nil {
 				log.WithFields(log.Fields{
 					"tag":  c.tag,
 					"port": c.info.Common.ServerPort,
-				}).Info("Port rebuilt successfully")
+				}).Warn("Port health check failed, rebuilding inbound")
+				_ = c.server.DelNode(c.tag)
+				time.Sleep(time.Second)
+				if rebuildErr := c.server.AddNode(c.tag, c.info); rebuildErr != nil {
+					log.WithFields(log.Fields{
+						"tag": c.tag,
+						"err": rebuildErr,
+					}).Error("Port rebuild failed, will retry next cycle")
+				} else {
+					// Re-add users after rebuild
+					if len(c.userList) > 0 {
+						_, _ = c.server.AddUsers(&vCore.AddUsersParams{
+							Tag:      c.tag,
+							NodeInfo: c.info,
+							Users:    c.userList,
+						})
+					}
+					log.WithFields(log.Fields{
+						"tag":  c.tag,
+						"port": c.info.Common.ServerPort,
+					}).Info("Port rebuilt successfully")
+				}
+			} else {
+				conn.Close()
 			}
-		} else {
-			conn.Close()
 		}
 	}
 

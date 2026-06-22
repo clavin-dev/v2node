@@ -40,7 +40,7 @@ func New(nodes []conf.NodeConfig) (*Node, error) {
 				}).Error("Create panel client failed, skipping this node")
 				return
 			}
-			info, err := p.GetNodeInfo()
+			info, initEtag, err := p.GetNodeInfo()
 			if err != nil {
 				log.WithFields(log.Fields{
 					"host": nodes[idx].APIHost,
@@ -49,6 +49,7 @@ func New(nodes []conf.NodeConfig) (*Node, error) {
 				}).Error("Get node info failed, skipping this node")
 				return
 			}
+			p.CommitNodeEtag(initEtag)
 			results <- result{
 				controller: NewController(p, &nodes[idx], info),
 				info:       info,
