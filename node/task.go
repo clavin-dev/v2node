@@ -97,9 +97,7 @@ func (c *Controller) nodeInfoMonitor() (err error) {
 	}
 
 	// Check if the config REALLY needs a port rebuild
-	var nodeInfoChanged = false
 	if nodeNeedsRebuild(c.info, newN) {
-		nodeInfoChanged = true
 		log.WithField("tag", c.tag).Info("Node config changed, rebuilding inbound")
 		// Remove old inbound
 		if err = c.server.DelNode(c.tag); err != nil {
@@ -173,11 +171,16 @@ func (c *Controller) nodeInfoMonitor() (err error) {
 		c.limiter.UpdateAliveList(newA)
 	}
 
-	if nodeInfoChanged {
-		// Node changed — users were already re-added above, just sync userList
-		c.userList = newU
-		c.apiClient.CommitUserEtag(newEtag)
-	} else if usersChanged {
+	// Always reconcile users against the panel as an incremental diff —
+	// whether or not the inbound was rebuilt this cycle. After a rebuild the
+	// new inbound was seeded with the OLD c.userList, so the diff
+	// (old c.userList -> newU) is exactly the delta needed to converge. This
+	// also captures users that were added in the SAME cycle as a config
+	// change, which the old nodeInfoChanged special-case dropped — causing
+	// those users to sit in c.userList but never get added to xray (permanent
+	// new-user desync). Only the changed users are touched; existing users'
+	// connections are never disturbed (no full reload, no downtime).
+	if usersChanged {
 		deleted, added, modified := compareUserList(c.userList, newU)
 		if len(deleted) > 0 {
 			err = c.server.DelUsers(deleted, c.tag, c.info)
