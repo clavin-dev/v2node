@@ -34,9 +34,7 @@ func (t *Task) Start(first bool) error {
 		timer := time.NewTimer(t.Interval)
 		defer timer.Stop()
 		if first {
-			if err := t.Execute(); err != nil {
-				return
-			}
+			t.runOnce()
 		}
 
 		for {
@@ -48,14 +46,30 @@ func (t *Task) Start(first bool) error {
 				return
 			}
 
-			if err := t.Execute(); err != nil {
-				log.Errorf("Task %s execution error: %v", t.Name, err)
-				return
-			}
+			t.runOnce()
 		}
 	}()
 
 	return nil
+}
+
+// runOnce executes the task body exactly once. A failed cycle — an error
+// return OR a panic (e.g. a panel returning empty/500, a transient network
+// blip, a nil deref during a rebuild) — is logged and swallowed so the
+// periodic loop ALWAYS continues. This is critical: previously a single
+// Execute error permanently killed the goroutine, so e.g. one bad heartbeat
+// cycle would stop nodeInfoMonitor forever and the node would show offline
+// indefinitely while its (separate) reporting task kept running. Now a bad
+// cycle is just skipped and the next interval retries.
+func (t *Task) runOnce() {
+	defer func() {
+		if r := recover(); r != nil {
+			log.Errorf("Task %s panicked (recovered, task continues): %v", t.Name, r)
+		}
+	}()
+	if err := t.Execute(); err != nil {
+		log.Errorf("Task %s execution error (task continues): %v", t.Name, err)
+	}
 }
 
 func (t *Task) safeStop() {
