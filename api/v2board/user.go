@@ -1,6 +1,7 @@
 package panel
 
 import (
+	"context"
 	"fmt"
 	"strings"
 
@@ -44,9 +45,10 @@ type AliveMap struct {
 // hours, while different edge cache policies cause some nodes to sync
 // and others to stay stuck. The user list is only a few KB, so pulling
 // it fresh every cycle is negligible and guarantees correctness.
-func (c *Client) GetUserList() ([]UserInfo, string, error) {
+func (c *Client) GetUserList(ctx context.Context) ([]UserInfo, string, error) {
 	const path = "/api/v1/server/UniProxy/user"
 	r, err := c.client.R().
+		SetContext(ctx).
 		SetHeader("X-Response-Format", "msgpack").
 		SetDoNotParseResponse(true).
 		Get(path)
@@ -107,10 +109,11 @@ func (c *Client) CommitUserEtag(etag string) {
 }
 
 // GetUserAlive will fetch the alive_ip count for users
-func (c *Client) GetUserAlive() (map[int]int, error) {
+func (c *Client) GetUserAlive(ctx context.Context) (map[int]int, error) {
 	c.AliveMap = &AliveMap{}
 	const path = "/api/v1/server/UniProxy/alivelist"
 	r, err := c.client.R().
+		SetContext(ctx).
 		ForceContentType("application/json").
 		Get(path)
 	if err != nil {
@@ -137,13 +140,14 @@ type UserTraffic struct {
 }
 
 // ReportUserTraffic reports the user traffic
-func (c *Client) ReportUserTraffic(userTraffic []UserTraffic) error {
+func (c *Client) ReportUserTraffic(ctx context.Context, userTraffic []UserTraffic) error {
 	data := make(map[int][]int64, len(userTraffic))
 	for i := range userTraffic {
 		data[userTraffic[i].UID] = []int64{userTraffic[i].Upload, userTraffic[i].Download}
 	}
 	const path = "/api/v1/server/UniProxy/push"
 	resp, err := c.client.R().
+		SetContext(ctx).
 		SetBody(data).
 		ForceContentType("application/json").
 		Post(path)
@@ -156,9 +160,10 @@ func (c *Client) ReportUserTraffic(userTraffic []UserTraffic) error {
 	return nil
 }
 
-func (c *Client) ReportNodeOnlineUsers(data *map[int][]string) error {
+func (c *Client) ReportNodeOnlineUsers(ctx context.Context, data *map[int][]string) error {
 	const path = "/api/v1/server/UniProxy/alive"
 	resp, err := c.client.R().
+		SetContext(ctx).
 		SetBody(data).
 		ForceContentType("application/json").
 		Post(path)

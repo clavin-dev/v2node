@@ -1,7 +1,9 @@
 package node
 
 import (
+	"context"
 	"fmt"
+	"time"
 
 	log "github.com/sirupsen/logrus"
 	panel "github.com/wyx2685/v2node/api/v2board"
@@ -41,10 +43,13 @@ func (c *Controller) Start(x *core.V2Core) error {
 	// Init Core
 	c.server = x
 	var err error
+	// Bound the startup fetches so a hung panel can't block Start forever.
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
 	// First fetch Node Info
 	node := c.info
 	if node == nil {
-		c.info, err = c.apiClient.GetNodeInfo()
+		c.info, err = c.apiClient.GetNodeInfo(ctx)
 		if err != nil {
 			return fmt.Errorf("get node info error: %s", err)
 		}
@@ -52,7 +57,7 @@ func (c *Controller) Start(x *core.V2Core) error {
 	}
 	// Update user
 	var initUserEtag string
-	c.userList, initUserEtag, err = c.apiClient.GetUserList()
+	c.userList, initUserEtag, err = c.apiClient.GetUserList(ctx)
 	if err != nil {
 		return fmt.Errorf("get user list error: %s", err)
 	}
@@ -60,7 +65,7 @@ func (c *Controller) Start(x *core.V2Core) error {
 	if len(c.userList) == 0 {
 		log.WithField("tag", node.Tag).Warn("No users found, node will start and wait for users")
 	}
-	c.aliveMap, err = c.apiClient.GetUserAlive()
+	c.aliveMap, err = c.apiClient.GetUserAlive(ctx)
 	if err != nil {
 		log.WithFields(log.Fields{"tag": c.tag, "err": err}).Warn("Get alive list failed, using empty")
 		c.aliveMap = make(map[int]int)

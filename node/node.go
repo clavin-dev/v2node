@@ -1,8 +1,10 @@
 package node
 
 import (
+	"context"
 	"fmt"
 	"sync"
+	"time"
 
 	log "github.com/sirupsen/logrus"
 	panel "github.com/wyx2685/v2node/api/v2board"
@@ -40,7 +42,9 @@ func New(nodes []conf.NodeConfig) (*Node, error) {
 				}).Error("Create panel client failed, skipping this node")
 				return
 			}
-			info, err := p.GetNodeInfo()
+			ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+			info, err := p.GetNodeInfo(ctx)
+			cancel()
 			if err != nil {
 				log.WithFields(log.Fields{
 					"host": nodes[idx].APIHost,

@@ -1,11 +1,13 @@
 package node
 
 import (
+	"context"
+
 	log "github.com/sirupsen/logrus"
 	panel "github.com/wyx2685/v2node/api/v2board"
 )
 
-func (c *Controller) reportUserTrafficTask() (err error) {
+func (c *Controller) reportUserTrafficTask(ctx context.Context) (err error) {
 	var reportmin = 0
 	var devicemin = 0
 	if c.info.Common.BaseConfig != nil {
@@ -14,7 +16,7 @@ func (c *Controller) reportUserTrafficTask() (err error) {
 	}
 	userTraffic, _ := c.server.GetUserTrafficSlice(c.tag, reportmin)
 	if len(userTraffic) > 0 {
-		err = c.apiClient.ReportUserTraffic(userTraffic)
+		err = c.apiClient.ReportUserTraffic(ctx, userTraffic)
 		if err != nil {
 			log.WithFields(log.Fields{
 				"tag": c.tag,
@@ -58,7 +60,7 @@ func (c *Controller) reportUserTrafficTask() (err error) {
 			data[onlineuser.UID] = append(data[onlineuser.UID], onlineuser.IP)
 		}
 		if len(data) != 0 {
-			err := c.apiClient.ReportNodeOnlineUsers(&data)
+			err := c.apiClient.ReportNodeOnlineUsers(ctx, &data)
 			if err != nil {
 				log.WithFields(log.Fields{
 					"tag": c.tag,

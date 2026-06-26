@@ -1,6 +1,7 @@
 package panel
 
 import (
+	"context"
 	"fmt"
 	"path/filepath"
 	"reflect"
@@ -128,10 +129,11 @@ type EncSettings struct {
 // Always fetches full config (no ETag/304) to ensure the panel
 // registers a heartbeat on every call. Change detection is handled
 // by nodeNeedsRebuild() in the caller.
-func (c *Client) GetNodeInfo() (node *NodeInfo, err error) {
+func (c *Client) GetNodeInfo(ctx context.Context) (node *NodeInfo, err error) {
 	const path = "/api/v2/server/config"
 	r, err := c.client.
 		R().
+		SetContext(ctx).
 		ForceContentType("application/json").
 		Get(path)
 	if err != nil {

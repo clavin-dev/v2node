@@ -1,6 +1,7 @@
 package task
 
 import (
+	"context"
 	"sync"
 	"time"
 
@@ -10,7 +11,7 @@ import (
 type Task struct {
 	Name     string
 	Interval time.Duration
-	Execute  func() error
+	Execute  func(context.Context) error
 	Access   sync.RWMutex
 	Running  bool
 	Stop     chan struct{}
@@ -62,13 +63,46 @@ func (t *Task) Start(first bool) error {
 // indefinitely while its (separate) reporting task kept running. Now a bad
 // cycle is just skipped and the next interval retries.
 func (t *Task) runOnce() {
-	defer func() {
-		if r := recover(); r != nil {
-			log.Errorf("Task %s panicked (recovered, task continues): %v", t.Name, r)
+	// Per-cycle watchdog. Bound how long one execution may run, then ALWAYS
+	// return to the loop. Execute runs in a child goroutine with a deadline
+	// context that is threaded into every network call, so if a call hangs
+	// (e.g. an HTTP read stuck despite the resty client timeout — the exact
+	// failure that froze nodeInfoMonitor inside GetNodeInfo and made the node
+	// show offline forever), the deadline fires, cancels the in-flight
+	// request, the stuck goroutine unblocks and exits (no leak), and the
+	// periodic loop proceeds to the next tick. A stuck cycle is skipped, never
+	// fatal — self-healing without a full reload.
+	timeout := 5 * t.Interval
+	if timeout > 5*time.Minute {
+		timeout = 5 * time.Minute
+	}
+	if timeout <= 0 {
+		timeout = time.Minute
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+	defer cancel()
+
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		defer func() {
+			if r := recover(); r != nil {
+				log.Errorf("Task %s panicked (recovered, task continues): %v", t.Name, r)
+			}
+		}()
+		if err := t.Execute(ctx); err != nil {
+			log.Errorf("Task %s execution error (task continues): %v", t.Name, err)
 		}
 	}()
-	if err := t.Execute(); err != nil {
-		log.Errorf("Task %s execution error (task continues): %v", t.Name, err)
+
+	select {
+	case <-done:
+	case <-ctx.Done():
+		// Deadline hit. The deferred cancel() cancels ctx, which unblocks any
+		// network call the Execute goroutine is stuck in (the request context
+		// is wired through), so it exits on its own. We return immediately so
+		// the loop continues — the next tick starts a fresh cycle.
+		log.Errorf("Task %s timed out after %s, cancelling stuck cycle and continuing", t.Name, timeout)
 	}
 }
 

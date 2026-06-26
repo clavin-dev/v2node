@@ -1,6 +1,7 @@
 package node
 
 import (
+	"context"
 	"fmt"
 	"net"
 	"time"
@@ -91,9 +92,9 @@ func nodeNeedsRebuild(old, new *panel.NodeInfo) bool {
 // 1. Fetch node info (always 200, no ETag/304)
 // 2. Compare critical fields with nodeNeedsRebuild
 // 3. Only do DelNode+AddNode if listener config actually changed
-func (c *Controller) nodeInfoMonitor() (err error) {
+func (c *Controller) nodeInfoMonitor(ctx context.Context) (err error) {
 	// Fetch node info — always returns fresh data (no ETag)
-	newN, err := c.apiClient.GetNodeInfo()
+	newN, err := c.apiClient.GetNodeInfo(ctx)
 	if err != nil {
 		log.WithFields(log.Fields{
 			"tag": c.tag,
@@ -149,7 +150,7 @@ func (c *Controller) nodeInfoMonitor() (err error) {
 
 	// Update users
 	var usersChanged = true
-	newU, newEtag, err := c.apiClient.GetUserList()
+	newU, newEtag, err := c.apiClient.GetUserList(ctx)
 	if err != nil {
 		if err.Error() == panel.UserNotModified {
 			usersChanged = false
@@ -164,7 +165,7 @@ func (c *Controller) nodeInfoMonitor() (err error) {
 	}
 
 	// get user alive — if it fails, we still proceed with user sync.
-	newA, err := c.apiClient.GetUserAlive()
+	newA, err := c.apiClient.GetUserAlive(ctx)
 	if err != nil {
 		log.WithFields(log.Fields{
 			"tag": c.tag,
