@@ -101,9 +101,15 @@ func getCore(c *conf.Conf, infos []*panel.NodeInfo) *core.Instance {
 	// ConnectionIdle = seconds a connection may sit idle before being closed.
 	// 60 matches XrayR — long enough to avoid churn, short enough to reclaim
 	// idle connections promptly (120s previously doubled the live conn count).
+	//
+	// StatsUserUplink/Downlink are FALSE on purpose: traffic is reported from
+	// our own per-user counters in the dispatcher (vc.dispatcher.Counter, read
+	// by GetUserTrafficSlice). xray's built-in per-user stats were never read
+	// (d.stats is assigned but unused), so enabling them only doubled the
+	// per-packet counting work and kept a redundant counter per user in RAM.
 	levelPolicyConfig := &coreConf.Policy{
-		StatsUserUplink:   true,
-		StatsUserDownlink: true,
+		StatsUserUplink:   false,
+		StatsUserDownlink: false,
 		Handshake:         proto.Uint32(10),
 		ConnectionIdle:    proto.Uint32(60),
 		UplinkOnly:        proto.Uint32(2),
