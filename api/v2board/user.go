@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"strings"
+	"time"
 
 	"encoding/json/jsontext"
 	"encoding/json/v2"
@@ -46,6 +47,8 @@ type AliveMap struct {
 // and others to stay stuck. The user list is only a few KB, so pulling
 // it fresh every cycle is negligible and guarantees correctness.
 func (c *Client) GetUserList(ctx context.Context) ([]UserInfo, string, error) {
+	ctx, cancel := context.WithTimeout(ctx, 15*time.Second)
+	defer cancel()
 	const path = "/api/v1/server/UniProxy/user"
 	r, err := c.client.R().
 		SetContext(ctx).
@@ -110,6 +113,8 @@ func (c *Client) CommitUserEtag(etag string) {
 
 // GetUserAlive will fetch the alive_ip count for users
 func (c *Client) GetUserAlive(ctx context.Context) (map[int]int, error) {
+	ctx, cancel := context.WithTimeout(ctx, 15*time.Second)
+	defer cancel()
 	c.AliveMap = &AliveMap{}
 	const path = "/api/v1/server/UniProxy/alivelist"
 	r, err := c.client.R().
@@ -141,6 +146,8 @@ type UserTraffic struct {
 
 // ReportUserTraffic reports the user traffic
 func (c *Client) ReportUserTraffic(ctx context.Context, userTraffic []UserTraffic) error {
+	ctx, cancel := context.WithTimeout(ctx, 15*time.Second)
+	defer cancel()
 	data := make(map[int][]int64, len(userTraffic))
 	for i := range userTraffic {
 		data[userTraffic[i].UID] = []int64{userTraffic[i].Upload, userTraffic[i].Download}
@@ -161,6 +168,8 @@ func (c *Client) ReportUserTraffic(ctx context.Context, userTraffic []UserTraffi
 }
 
 func (c *Client) ReportNodeOnlineUsers(ctx context.Context, data *map[int][]string) error {
+	ctx, cancel := context.WithTimeout(ctx, 15*time.Second)
+	defer cancel()
 	const path = "/api/v1/server/UniProxy/alive"
 	resp, err := c.client.R().
 		SetContext(ctx).

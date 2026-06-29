@@ -130,6 +130,8 @@ type EncSettings struct {
 // registers a heartbeat on every call. Change detection is handled
 // by nodeNeedsRebuild() in the caller.
 func (c *Client) GetNodeInfo(ctx context.Context) (node *NodeInfo, err error) {
+	ctx, cancel := context.WithTimeout(ctx, 15*time.Second)
+	defer cancel()
 	const path = "/api/v2/server/config"
 	r, err := c.client.
 		R().

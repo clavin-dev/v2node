@@ -1,9 +1,7 @@
 package panel
 
 import (
-	"crypto/tls"
 	"errors"
-	"net/http"
 	"strconv"
 	"time"
 
@@ -28,27 +26,14 @@ type Client struct {
 
 func New(c *conf.NodeConfig) (*Client, error) {
 	client := resty.New()
-	// CRITICAL: control-plane connection hardening. Without this, the panel
-	// goes "offline" after a few hours of uptime even though Xray is fine.
-	//
-	// 1. Fully disable HTTP/2. Behind Cloudflare, Go's TLS ALPN negotiates h2
-	//    and multiplexes every request onto a single TCP connection. When that
-	//    connection rots, ALL requests (heartbeat included) silently hang until
-	//    timeout, so the panel stops seeing heartbeats and marks the node
-	//    offline. ForceAttemptHTTP2=false alone is NOT enough — an empty,
-	//    non-nil TLSNextProto map is the Go-official way to truly disable h2.
-	// 2. Disable keep-alive: use a fresh TCP+TLS connection per call. v2node
-	//    only hits the panel ~every 60s, so the ~100ms handshake cost is
-	//    negligible, but reusing a connection that Cloudflare/Nginx silently
-	//    RST'd (after 1-3h) makes every later request time out. Fresh
-	//    connections = zero connection-rot risk.
-	client.SetTransport(&http.Transport{
-		ForceAttemptHTTP2:     false,
-		TLSNextProto:          make(map[string]func(authority string, c *tls.Conn) http.RoundTripper),
-		TLSHandshakeTimeout:   10 * time.Second,
-		ResponseHeaderTimeout: 15 * time.Second,
-		DisableKeepAlives:     true,
-	})
+	// Use Go's default HTTP transport (HTTP/2 + keep-alive) — the same behavior
+	// as upstream v2node and curl, both of which talk to the (CDN-fronted)
+	// panels reliably (~1s). The previous forced-HTTP/1.1 + DisableKeepAlives
+	// transport made requests to some CDN-fronted panels hang for minutes and
+	// leak one connection per hang (observed: 1200+ leaked conns, FD climbing).
+	// Each panel call is now bounded by a per-request timeout (see the api
+	// methods) and backstopped by the task watchdog, so stalls fail fast and
+	// retry instead of hanging — without disabling keep-alive.
 	client.SetRetryCount(3)
 	if c.Timeout > 0 {
 		client.SetTimeout(time.Duration(c.Timeout) * time.Second)
